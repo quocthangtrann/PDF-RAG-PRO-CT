@@ -1,0 +1,12 @@
+files:
+  document_path: "GD3.pdf"
+
+retrieval:
+  vector_search_k: 5
+  bm25_search_k: 5
+  ensemble_weights: [0.4, 0.6]
+  rerank_top_n: 3
+
+model:
+  llm_name: "gemini-2.5-flash"  
+  temperature: 0.0
