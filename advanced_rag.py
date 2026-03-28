@@ -2,6 +2,11 @@ import os
 import yaml
 from dotenv import load_dotenv
 
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+import uvicorn
+
 # Document Loaders & Splitters
 from langchain_community.document_loaders import PyPDFLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
@@ -27,8 +32,7 @@ load_dotenv()
 with open("config.yaml", "r", encoding="utf-8") as file:
     config = yaml.safe_load(file)
 
-def build_advanced_rag():
-    pdf_path = config['files']['document_path']
+def build_advanced_rag(pdf_path: str):
     if not os.path.exists(pdf_path):
         raise FileNotFoundError(f"Do not find: {pdf_path}")
 
@@ -46,7 +50,6 @@ def build_advanced_rag():
         separators=["\n\n", "\n", ".", " "]
     )
     chunks = text_splitter.split_documents(docs)
-    print(f"-> Document split into {len(chunks)} chunks.")
 
     print("[3/5] Setting up Hybrid Search (ChromaDB + BM25)...")
     vectorstore = Chroma.from_documents(chunks, embeddings)
@@ -72,20 +75,22 @@ def build_advanced_rag():
     print("[5/5] Setting up Google Gemini LLM...")
     llm = ChatGoogleGenerativeAI(
         model=config['model']['llm_name'],
-        temperature=config['model']['temperature'],
-        convert_system_message_to_human=True 
+        temperature=config['model']['temperature']
     )
     
-    system_prompt = (
-        "You are a professional AI assistant who understands documents. "
-        "Use the context below to answer the question. "
-        "If you don't find the information, say 'I couldn't find this information in the document', don't make things up.\n\n"
-        "Document context:\n{context}"
-    )
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", system_prompt),
-        ("human", "{input}"),
-    ])
+    # Combine the Prompt into a single, strictly enforced instruction
+    template = """You are a professional AI assistant for document comprehension.
+Your task is to answer the user's question BASED STRICTLY ON THE CONTEXT BELOW.
+DO NOT use outside knowledge. DO NOT apologize. DO NOT explain that you are a text-based AI.
+If the information is not in the context, reply with EXACTLY THIS SENTENCE: "I couldn't find this information in the document."
+
+Context extracted from the document:
+{context}
+
+User's question: {input}
+Answer:"""
+
+    prompt = ChatPromptTemplate.from_template(template)
     
     question_answer_chain = create_stuff_documents_chain(llm, prompt)
     rag_chain = create_retrieval_chain(compression_retriever, question_answer_chain)
@@ -93,30 +98,53 @@ def build_advanced_rag():
     print("\nSYSTEM READY!\n" + "="*40)
     return rag_chain
 
-def chat_interface():
+app = FastAPI(title="PDF - RAG API")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# save rag pipeline in global var to reuse across requests 
+rag_pipelines = {}
+
+# new api
+class IngestRequest(BaseModel):
+    document_id: int
+    file_path: str
+
+@app.post("/api/ingest")
+async def ingest_document(request: IngestRequest):
     try:
-        rag_pipeline = build_advanced_rag()
+        # build RAG pipeline for doc, save it in global dict with document_id as key
+        chain = build_advanced_rag(request.file_path)
+        rag_pipelines[request.document_id] = chain
+        print(f"upload doc_id successfully {request.document_id} into AI mem")
+        return {"status": "success"}
     except Exception as e:
-        print(f"Error initializing system: {e}")
-        return
+        raise HTTPException(status_code=500, detail=str(e))
+
+class ChatRequest(BaseModel):
+    document_id: int
+    question: str
+
+@app.post("/api/ask")
+async def ask_question(request: ChatRequest):
+    # retrieve the corresponding RAG pipeline for the doc_id, if not found return error
+    chain = rag_pipelines.get(request.document_id)
+    if not chain:
+        raise HTTPException(status_code=404, detail="Document not found. Please upload the document first.")
     
-    while True:
-        user_query = input("\n👤 You: ")
-        if user_query.lower() in ['exit', 'quit', 'thoát', 'q']:
-            print("🤖 Chatbot: goodbye!")
-            break
-            
-        print("🤖 Chatbot thinking...")
-        try:
-            response = rag_pipeline.invoke({"input": user_query})
-            print("\n🤖 answer:", response["answer"])
-            
-            print("\nReference:")
-            for i, doc in enumerate(response["context"]):
-                snippet = doc.page_content[:100].replace('\n', ' ')
-                print(f"  [{i+1}] Trang {doc.metadata.get('page', 'N/A')}: {snippet}...")
-        except Exception as e:
-            print(f"\nerror: {e}")
+    try:
+        response = chain.invoke({"input": request.question})
+        sources = [{"page": doc.metadata.get('page', 'N/A'), "snippet": doc.page_content[:150].replace('\n', ' ') + "..."} for doc in response["context"]]
+        return {"status": "success", "answer": response["answer"], "sources": sources}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
-    chat_interface()
+    print("Starting API server on http://localhost:8000")
+    uvicorn.run(app, host="0.0.0.0", port=8000)
