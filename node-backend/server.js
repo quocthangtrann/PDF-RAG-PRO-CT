@@ -51,51 +51,60 @@ const storage = multer.diskStorage({
 });
 const upload = multer({ storage: storage });
 
-app.post('/api/upload', upload.single('pdf_file'), (req, res) => {
-    if (!req.file) return res.status(400).json({ error: "Vui lòng tải lên một file PDF" });
-    const filename = req.file.filename;
+app.post('/api/upload', upload.array('pdf_files', 50), async (req, res) => {
+    if (!req.files || req.files.length === 0) return res.status(400).json({ error: "Please upload at least one PDF file" });
     
-    db.run(`INSERT INTO documents (filename) VALUES (?)`, [filename], async function(err) {
-        if (err) return res.status(500).json({ error: err.message });
+    try {
+        const uploadedDocs = [];
         
-        const docId = this.lastID;
-        // Lấy đường dẫn tuyệt đối của file vừa lưu trên máy Mac
-        const absolutePath = path.resolve(req.file.path);
+        for (const file of req.files) {
+            const filename = file.filename;
+            
+            const docId = await new Promise((resolve, reject) => {
+                db.run(`INSERT INTO documents (filename) VALUES (?)`, [filename], function(err) {
+                    if (err) reject(err);
+                    else resolve(this.lastID);
+                });
+            });
 
-        try {
-            // "GỌI ĐIỆN" BÁO CHO PYTHON NẠP FILE MỚI NÀY VÀO NÃO AI
+            // Get absolute path of the saved file
+            const absolutePath = path.resolve(file.path);
+
+            // Call Python to ingest the new file into AI brain
             await axios.post('http://127.0.0.1:8000/api/ingest', {
                 document_id: docId,
                 file_path: absolutePath
             });
 
-            res.json({ message: "Tải và nạp AI thành công", document_id: docId, filename: filename });
-        } catch (error) {
-            console.error("Lỗi khi báo Python đọc file:", error.message);
-            res.status(500).json({ error: "Tải file thành công nhưng AI nạp dữ liệu thất bại." });
+            uploadedDocs.push({ document_id: docId, filename: filename });
         }
-    });
+
+        res.json({ message: "Successfully uploaded and ingested all files", documents: uploadedDocs });
+    } catch (error) {
+        console.error("Error calling Python to read file:", error.message);
+        res.status(500).json({ error: "Failed to ingest data into AI systems.", details: error.message });
+    }
 });
 
 // api connect to ai model
 app.post('/api/chat', async (req, res) => {
-    const { document_id, question } = req.body;
-    if (!question) return res.status(400).json({ error: "Câu hỏi không được để trống" });
-    if (!document_id) return res.status(400).json({ error: "Vui lòng tải file PDF lên trước" });
+    const { question } = req.body;
+    if (!question) return res.status(400).json({ error: "Question cannot be empty" });
+    // No need to catch missing document_id as we query global knowledge base
 
     try {
-        // Gọi Python và truyền theo document_id để Python biết đang hỏi file nào
+        // Call Python to ask
         const pythonResponse = await axios.post('http://127.0.0.1:8000/api/ask', {
-            document_id: document_id,
             question: question
         });
 
         const ai_answer = pythonResponse.data.answer;
 
+        // document_id can be null due to global query
         db.run(`INSERT INTO chats (document_id, user_query, ai_response) VALUES (?, ?, ?)`, 
-            [document_id, question, ai_answer], 
+            [null, question, ai_answer], 
             function(err) {
-                if (err) console.error("Lỗi lưu lịch sử chat:", err);
+                if (err) console.error("Error saving chat history:", err);
             }
         );
 
@@ -107,18 +116,18 @@ app.post('/api/chat', async (req, res) => {
         });
 
     } catch (error) {
-        console.error("❌ Lỗi khi gọi Python AI:", error?.response?.data || error.message);
-        res.status(500).json({ error: "Hệ thống AI đang bận hoặc không tìm thấy tài liệu." });
+        console.error("Error calling Python AI:", error?.response?.data || error.message);
+        res.status(500).json({ error: "AI system is busy or documents not found. (Please upload documents first)" });
     }
 });
 
-// Giữ cho server không bao giờ chết
+// Keep server alive
 process.on('uncaughtException', function (err) {
-    console.error("Bắt được lỗi ngầm:", err);
+    console.error("Caught unhandled exception:", err);
 });
 
-// Khởi động Server
+// Start Server
 app.listen(PORT, () => {
-    console.log(`🚀 NodeJS Backend đang chạy CỰC KỲ ỔN ĐỊNH tại http://localhost:${PORT}`);
-    console.log(`(Hãy để cửa sổ Terminal này chạy nguyên như vậy)`);
+    console.log(`NodeJS Backend is running perfectly at http://localhost:${PORT}`);
+    console.log(`(Leave this terminal window running)`);
 });
