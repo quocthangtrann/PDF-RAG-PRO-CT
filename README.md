@@ -118,5 +118,5 @@ npm start
 ```
 *(The UI will automatically open in your browser at `http://localhost:3000`)*
 
-### 🎉 You're ready!
+### You're ready!
 You can now upload PDFs via the browser interface and converse with the system. Keep an eye on Terminal 1 (Python) to see real-time updates of chunking calculations, retrieval metrics, and Ragas background evaluation scores!
