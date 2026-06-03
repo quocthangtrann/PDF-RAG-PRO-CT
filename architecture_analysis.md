@@ -85,15 +85,31 @@ Khi người dùng đặt câu hỏi, một 파ipline RAG tinh vi được kích
 
 ## 5. KIẾN TRÚC DATABASE (Database Architecture)
 
-Hệ thống sử dụng **SQLite**, hệ quản trị cơ sở dữ liệu quan hệ nhẹ, chạy trực tiếp trên file `database.sqlite` cục bộ, rất phù hợp cho các kiến trúc vừa và nhỏ.
+Hệ thống sử dụng **SQLite**, hệ quản trị cơ sở dữ liệu quan hệ nhẹ, chạy trực tiếp trên file `database.sqlite` cục bộ. Việc lựa chọn SQLite giúp dễ dàng deploy ứng dụng mà không cần cài đặt database server phức tạp (như MySQL hay PostgreSQL), rất phù hợp cho cấu trúc microservices nhẹ hiện tại.
 
-**Cấu trúc 2 bảng cốt lõi:**
+### 5.1. Cấu trúc các bảng (Schema)
 1. **Bảng `documents`:** 
-   - `id`, `filename`, `upload_date`.
-   - Vai trò: Lưu trữ bằng chứng vật lý của file, ánh xạ giữa tên file thực tế và file đã mã hóa trên hệ thống thư mục (`DOC-xxx.pdf`).
+   - **Cấu trúc:** `id` (Primary Key), `filename`, `upload_date`.
+   - **Vai trò:** Lưu trữ thông tin metadata của file. Đóng vai trò là cầu nối ánh xạ giữa dữ liệu vật lý trên ổ cứng (các file được đổi tên thành định dạng `DOC-[timestamp].pdf` qua Multer) và dữ liệu quản lý nội bộ.
 2. **Bảng `chats`:**
-   - `id`, `document_id` (Khóa ngoại), `user_query`, `ai_response`, `chat_date`.
-   - Vai trò: Duy trì toàn bộ lịch sử (History State) của các phiên hỏi đáp, làm cơ sở để phân tích hành vi người dùng, hoặc bổ sung tính năng Chat History (Lịch sử trò chuyện) về sau.
+   - **Cấu trúc:** `id` (Primary Key), `document_id` (Khóa ngoại trỏ về `documents`), `user_query`, `ai_response`, `chat_date`.
+   - **Vai trò:** Duy trì lịch sử toàn bộ các phiên hỏi đáp (Chat History State). Dữ liệu này làm cơ sở vững chắc để phát triển thêm tính năng "Tải lại lịch sử chat cũ" hoặc để kỹ sư phân tích mức độ hài lòng/chính xác của câu trả lời AI theo thời gian.
+
+### 5.2. Luồng hoạt động và Bóc tách Query (Data Flow & Query Execution)
+
+Thiết kế của hệ thống bóc tách hoàn toàn logic thao tác Database (CRUD) tại tầng API Gateway (Node.js). Core AI (Python) hoàn toàn không biết đến sự tồn tại của SQLite, đảm bảo tính đóng gói (Encapsulation):
+
+**Luồng 1: Ghi nhận tài liệu mới (Upload Flow)**
+1. Khi file PDF tải lên và được Multer lưu vật lý thành công, Node.js sẽ khởi tạo truy vấn: 
+   `INSERT INTO documents (filename) VALUES (?)`
+2. Thông qua cơ chế Promise bất đồng bộ, Node.js chờ lệnh hoàn thành và lấy ra `lastID` (ID của tài liệu vừa tạo).
+3. Chỉ khi bản ghi DB tồn tại, Node.js mới gửi `document_id` và đường dẫn file vật lý sang cho Python AI Engine để nhúng (Embedding) vào Vector DB. Việc bóc tách này đảm bảo Vector Database và SQLite luôn đồng nhất trạng thái.
+
+**Luồng 2: Lưu vết truy vấn AI (Chat Flow)**
+1. Node.js không can thiệp vào ngữ nghĩa câu hỏi mà trực tiếp ủy quyền cho Python xử lý thông qua API `/api/ask`. (Quá trình bóc tách context được xử lý riêng tại Vector DB của Python).
+2. Khi Python gửi trả kết quả `ai_answer`, Node.js mới đóng vai trò lưu vết bằng query:
+   `INSERT INTO chats (document_id, user_query, ai_response) VALUES (?, ?, ?)`
+3. **Lưu ý trong kiến trúc truy vấn:** Hiện tại hệ thống đang được cấu hình dưới dạng *"Global Knowledge Base"* (Kiến thức toàn cục), tức là AI sẽ tìm kiếm trên mọi file đã tải lên. Do đó, logic bóc tách ở Node.js đang lưu `document_id = null` cho các câu hỏi tổng hợp. Cách thiết kế mở này cho phép trong tương lai hệ thống dễ dàng rẽ nhánh: Nếu user hỏi 1 file (lưu `document_id` cụ thể), nếu user hỏi chéo nhiều file (lưu `null`).
 
 ---
 
